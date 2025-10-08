@@ -351,6 +351,7 @@ public abstract class AbstractExportCommand extends SimpleCommand<ExportResult> 
 	/**
 	 * Applies exclusion cleanup to the sync directory after export.
 	 * Deletes files and folders matching the exclusion patterns.
+	 * Also filters the .FirstSpirit metadata files to remove references to excluded elements.
 	 *
 	 * @param syncDir The sync directory
 	 * @param excludePatterns List of exclusion patterns
@@ -358,6 +359,9 @@ public abstract class AbstractExportCommand extends SimpleCommand<ExportResult> 
 	private void applyExclusionCleanup(final File syncDir, final List<String> excludePatterns) {
 		final StorePathExclusionMatcher matcher = new StorePathExclusionMatcher(excludePatterns);
 		LOGGER.info("Applying exclusion patterns: {}", String.join(", ", excludePatterns));
+
+		// Collect excluded paths for metadata filtering
+		final List<String> excludedPaths = new ArrayList<>();
 
 		int excludedCount = 0;
 		try (Stream<Path> paths = Files.walk(syncDir.toPath())) {
@@ -370,6 +374,10 @@ public abstract class AbstractExportCommand extends SimpleCommand<ExportResult> 
 
 			for (File file : filesToDelete) {
 				try {
+					// Track excluded paths for metadata filtering
+					final Path relativePath = syncDir.toPath().relativize(file.toPath());
+					excludedPaths.add(relativePath.toString().replace('\\', '/'));
+
 					if (file.isDirectory()) {
 						// Only delete if directory is empty (children already deleted)
 						if (file.list() != null && file.list().length == 0) {
@@ -391,6 +399,241 @@ public abstract class AbstractExportCommand extends SimpleCommand<ExportResult> 
 		}
 
 		LOGGER.info("Excluded {} files/folders from export", excludedCount);
+
+		// Filter .FirstSpirit metadata files
+		filterFirstSpiritMetadata(syncDir, excludedPaths);
+	}
+
+	/**
+	 * Filters .FirstSpirit metadata files to remove references to excluded paths.
+	 *
+	 * @param syncDir The sync directory
+	 * @param excludedPaths List of excluded relative paths
+	 */
+	private void filterFirstSpiritMetadata(final File syncDir, final List<String> excludedPaths) {
+		if (excludedPaths.isEmpty()) {
+			return;
+		}
+
+		final File firstSpiritDir = new File(syncDir, ".FirstSpirit");
+		if (!firstSpiritDir.exists() || !firstSpiritDir.isDirectory()) {
+			return;
+		}
+
+		// Find Import_*.txt files
+		final File[] importFiles = firstSpiritDir.listFiles((dir, name) ->
+			name.startsWith("Import_") && name.endsWith(".txt"));
+
+		if (importFiles != null && importFiles.length > 0) {
+			for (File importFile : importFiles) {
+				try {
+					filterImportMetadataFile(importFile, excludedPaths);
+				} catch (IOException e) {
+					LOGGER.warn("Failed to filter Import metadata file: {}", importFile.getName(), e);
+				}
+			}
+		}
+
+		// Find Files_*.txt files
+		final File[] filesFiles = firstSpiritDir.listFiles((dir, name) ->
+			name.startsWith("Files_") && name.endsWith(".txt"));
+
+		if (filesFiles != null && filesFiles.length > 0) {
+			for (File filesFile : filesFiles) {
+				try {
+					filterFilesMetadataFile(filesFile, excludedPaths);
+				} catch (IOException e) {
+					LOGGER.warn("Failed to filter Files metadata file: {}", filesFile.getName(), e);
+				}
+			}
+		}
+	}
+
+	/**
+	 * Filters an Import metadata file to remove entries for excluded paths.
+	 *
+	 * @param importFile The Import_*.txt file
+	 * @param excludedPaths List of excluded relative paths
+	 */
+	private void filterImportMetadataFile(final File importFile, final List<String> excludedPaths) throws IOException {
+		final List<String> lines = Files.readAllLines(importFile.toPath());
+		final List<String> filteredLines = new ArrayList<>();
+
+		int removedEntries = 0;
+		boolean inExcludedBlock = false;
+		boolean isHeaderSection = true;
+
+		for (int i = 0; i < lines.size(); i++) {
+			final String line = lines.get(i);
+
+			// Keep header lines (comments and metadata)
+			if (line.startsWith("#") || line.trim().isEmpty()) {
+				if (!inExcludedBlock) {
+					filteredLines.add(line);
+				}
+				continue;
+			}
+
+			isHeaderSection = false;
+
+			// Check if this is a block start [ID]
+			if (line.startsWith("[") && line.endsWith("]")) {
+				// Check if the next lines contain a name that should be excluded
+				inExcludedBlock = false;
+
+				// Look ahead to find the name field
+				for (int j = i + 1; j < lines.size() && j < i + 15; j++) {
+					final String nextLine = lines.get(j);
+					if (nextLine.startsWith("[")) {
+						// Reached next block
+						break;
+					}
+					if (nextLine.startsWith("name=")) {
+						final String name = nextLine.substring(5);
+						if (isPathExcluded(name, excludedPaths)) {
+							inExcludedBlock = true;
+							removedEntries++;
+							LOGGER.debug("Excluding metadata entry: {}", name);
+						}
+						break;
+					}
+				}
+
+				if (!inExcludedBlock) {
+					filteredLines.add(line);
+				}
+			} else if (!inExcludedBlock) {
+				filteredLines.add(line);
+			}
+		}
+
+		if (removedEntries > 0) {
+			Files.write(importFile.toPath(), filteredLines);
+			LOGGER.info("Removed {} entries from metadata file: {}", removedEntries, importFile.getName());
+		}
+	}
+
+	/**
+	 * Filters a Files metadata file to remove entries for excluded IDs.
+	 *
+	 * @param filesFile The Files_*.txt file
+	 * @param excludedPaths List of excluded relative paths
+	 */
+	private void filterFilesMetadataFile(final File filesFile, final List<String> excludedPaths) throws IOException {
+		// First, collect the excluded IDs from the corresponding Import file
+		final String filesFileName = filesFile.getName();
+		final String importFileName = filesFileName.replace("Files_", "Import_");
+		final File importFile = new File(filesFile.getParent(), importFileName);
+
+		if (!importFile.exists()) {
+			LOGGER.debug("No corresponding Import file found for: {}", filesFileName);
+			return;
+		}
+
+		// Collect excluded IDs from Import file
+		final java.util.Set<String> excludedIds = collectExcludedIds(importFile, excludedPaths);
+
+		if (excludedIds.isEmpty()) {
+			return;
+		}
+
+		// Filter Files_*.txt based on excluded IDs
+		final List<String> lines = Files.readAllLines(filesFile.toPath());
+		final List<String> filteredLines = new ArrayList<>();
+
+		boolean inExcludedBlock = false;
+		int removedBlocks = 0;
+
+		for (String line : lines) {
+			// Check if this is a block start [ID]
+			if (line.startsWith("[") && line.endsWith("]")) {
+				final String id = line.substring(1, line.length() - 1);
+				inExcludedBlock = excludedIds.contains(id);
+				if (inExcludedBlock) {
+					removedBlocks++;
+					LOGGER.debug("Excluding Files metadata block: [{}]", id);
+				}
+			}
+
+			if (!inExcludedBlock) {
+				filteredLines.add(line);
+			}
+		}
+
+		if (removedBlocks > 0) {
+			Files.write(filesFile.toPath(), filteredLines);
+			LOGGER.info("Removed {} file blocks from metadata: {}", removedBlocks, filesFile.getName());
+		}
+	}
+
+	/**
+	 * Collects IDs of entries that should be excluded from an Import metadata file.
+	 *
+	 * @param importFile The Import_*.txt file
+	 * @param excludedPaths List of excluded relative paths
+	 * @return Set of IDs to exclude
+	 */
+	private java.util.Set<String> collectExcludedIds(final File importFile, final List<String> excludedPaths) throws IOException {
+		final java.util.Set<String> excludedIds = new java.util.HashSet<>();
+		final List<String> lines = Files.readAllLines(importFile.toPath());
+
+		String currentId = null;
+
+		for (int i = 0; i < lines.size(); i++) {
+			final String line = lines.get(i);
+
+			// Skip header lines
+			if (line.startsWith("#") || line.trim().isEmpty()) {
+				continue;
+			}
+
+			// Check if this is a block start [ID]
+			if (line.startsWith("[") && line.endsWith("]")) {
+				currentId = line.substring(1, line.length() - 1);
+
+				// Look ahead to find the name field
+				for (int j = i + 1; j < lines.size() && j < i + 15; j++) {
+					final String nextLine = lines.get(j);
+					if (nextLine.startsWith("[")) {
+						break;
+					}
+					if (nextLine.startsWith("name=")) {
+						final String name = nextLine.substring(5);
+						if (isPathExcluded(name, excludedPaths)) {
+							excludedIds.add(currentId);
+							LOGGER.debug("Collected excluded ID: {}", currentId);
+						}
+						break;
+					}
+				}
+			}
+		}
+
+		return excludedIds;
+	}
+
+	/**
+	 * Checks if a metadata entry name matches any excluded path.
+	 *
+	 * @param name The name from the metadata (e.g., "/translation_studio")
+	 * @param excludedPaths List of excluded paths
+	 * @return true if the path should be excluded
+	 */
+	private boolean isPathExcluded(final String name, final List<String> excludedPaths) {
+		final String normalizedName = name.startsWith("/") ? name.substring(1) : name;
+
+		for (String excludedPath : excludedPaths) {
+			// Extract just the folder name from the excluded path
+			// e.g., "TemplateStore/PageTemplates/translation_studio" -> "translation_studio"
+			final String[] pathParts = excludedPath.split("/");
+			final String folderName = pathParts[pathParts.length - 1];
+
+			if (normalizedName.equals(folderName) || normalizedName.endsWith("/" + folderName)) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 }
