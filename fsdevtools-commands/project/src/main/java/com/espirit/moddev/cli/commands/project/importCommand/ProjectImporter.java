@@ -50,8 +50,15 @@ import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -59,6 +66,12 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
+import java.util.stream.Stream;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
+import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
+import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
 
 /**
  * Class that can import a given FirstSpirit project into a server.
@@ -99,10 +112,30 @@ public class ProjectImporter {
 			// remove export file, if it already exists
 			deleteExportFile(parameters, projectStorage);
 
+			// apply exclusion filtering if patterns are provided
+			final File fileToImport;
+			final File tempFilteredFile;
+			if (!parameters.getExcludePatterns().isEmpty()) {
+				final FileExclusionMatcher matcher = new FileExclusionMatcher(parameters.getExcludePatterns());
+				tempFilteredFile = createFilteredExportFile(parameters.getProjectFile(), matcher);
+				fileToImport = tempFilteredFile;
+				LOGGER.info("Applied exclusion patterns: {}", String.join(", ", parameters.getExcludePatterns()));
+			} else {
+				tempFilteredFile = null;
+				fileToImport = parameters.getProjectFile();
+			}
+
 			// get project info from export file
 			final ExportFile exportFile;
-			try (final FileInputStream fileInputStream = new FileInputStream(parameters.getProjectFile())) {
-				exportFile = projectStorage.uploadExportFile(parameters.getProjectFile().getName(), fileInputStream);
+			try (final FileInputStream fileInputStream = new FileInputStream(fileToImport)) {
+				exportFile = projectStorage.uploadExportFile(fileToImport.getName(), fileInputStream);
+			} finally {
+				// clean up temporary filtered file if created
+				if (tempFilteredFile != null && tempFilteredFile.exists()) {
+					if (!tempFilteredFile.delete()) {
+						LOGGER.warn("Failed to delete temporary filtered file: {}", tempFilteredFile.getAbsolutePath());
+					}
+				}
 			}
 			final ProjectInfo projectInfo = projectStorage.getProjectInfo(exportFile);
 
@@ -323,5 +356,58 @@ public class ProjectImporter {
 		}
 		LOGGER.debug("Could not find project " + projectName);
 		return false;
+	}
+
+	/**
+	 * Creates a filtered copy of the export file by excluding files matching the provided patterns.
+	 *
+	 * @param originalFile the original export tar.gz file
+	 * @param matcher the exclusion matcher with configured patterns
+	 * @return a temporary filtered tar.gz file
+	 * @throws IOException if file operations fail
+	 */
+	@NotNull
+	private static File createFilteredExportFile(@NotNull final File originalFile, @NotNull final FileExclusionMatcher matcher) throws IOException {
+		// create temporary file for filtered export
+		final File tempFile = File.createTempFile("filtered-export-", ".tar.gz");
+		int excludedCount = 0;
+		int includedCount = 0;
+
+		try (final FileInputStream fis = new FileInputStream(originalFile);
+			 final BufferedInputStream bis = new BufferedInputStream(fis);
+			 final GzipCompressorInputStream gzis = new GzipCompressorInputStream(bis);
+			 final TarArchiveInputStream tais = new TarArchiveInputStream(gzis);
+			 final FileOutputStream fos = new FileOutputStream(tempFile);
+			 final BufferedOutputStream bos = new BufferedOutputStream(fos);
+			 final GzipCompressorOutputStream gzos = new GzipCompressorOutputStream(bos);
+			 final TarArchiveOutputStream taos = new TarArchiveOutputStream(gzos)) {
+
+			TarArchiveEntry entry;
+			while ((entry = tais.getNextEntry()) != null) {
+				final Path entryPath = Paths.get(entry.getName());
+
+				// check if this entry should be excluded
+				if (matcher.shouldExclude(entryPath)) {
+					LOGGER.debug("Excluding: {}", entry.getName());
+					excludedCount++;
+					continue;
+				}
+
+				// include this entry in filtered archive
+				taos.putArchiveEntry(entry);
+				if (!entry.isDirectory()) {
+					final byte[] buffer = new byte[8192];
+					int bytesRead;
+					while ((bytesRead = tais.read(buffer)) != -1) {
+						taos.write(buffer, 0, bytesRead);
+					}
+				}
+				taos.closeArchiveEntry();
+				includedCount++;
+			}
+		}
+
+		LOGGER.info("Excluded {} files matching patterns, included {} files", excludedCount, includedCount);
+		return tempFile;
 	}
 }

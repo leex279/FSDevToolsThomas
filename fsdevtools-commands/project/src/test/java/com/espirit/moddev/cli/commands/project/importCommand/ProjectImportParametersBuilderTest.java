@@ -27,6 +27,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -87,6 +90,37 @@ public class ProjectImportParametersBuilderTest {
 		assertEquals(description, parameters.getProjectDescription());
 		assertEquals(_fileMock, parameters.getProjectFile());
 		assertTrue(parameters.forceProjectActivation());
+	}
+
+	@Test
+	public void testSetExcludePatterns() {
+		List<String> patterns = Arrays.asList("*.log", "temp/*");
+		ProjectImportParameters params = _builder
+			.setProjectName("test")
+			.setProjectFile(_fileMock)
+			.setExcludePatterns(patterns)
+			.create();
+		assertEquals(patterns, params.getExcludePatterns());
+	}
+
+	@Test
+	public void testSetExcludePatternsNull() {
+		ProjectImportParameters params = _builder
+			.setProjectName("test")
+			.setProjectFile(_fileMock)
+			.setExcludePatterns(null)
+			.create();
+		assertTrue(params.getExcludePatterns().isEmpty());
+	}
+
+	@Test
+	public void testSetExcludePatternsEmpty() {
+		ProjectImportParameters params = _builder
+			.setProjectName("test")
+			.setProjectFile(_fileMock)
+			.setExcludePatterns(new ArrayList<>())
+			.create();
+		assertTrue(params.getExcludePatterns().isEmpty());
 	}
 
 }

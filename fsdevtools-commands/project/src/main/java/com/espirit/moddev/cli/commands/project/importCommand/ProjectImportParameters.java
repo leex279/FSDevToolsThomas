@@ -25,6 +25,7 @@ package com.espirit.moddev.cli.commands.project.importCommand;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.File;
+import java.util.List;
 import java.util.Map;
 
 public class ProjectImportParameters {
@@ -34,13 +35,15 @@ public class ProjectImportParameters {
 	private final Map<String, String> _layerMapping;
 	private final String _projectDescription;
 	private final boolean _forceProjectActivation;
+	private final List<String> _excludePatterns;
 
-	public ProjectImportParameters(@NotNull final String projectName, @NotNull final String projectDescription, @NotNull final File projectFile, @NotNull final Map<String, String> layerMapping, final boolean forceProjectActivation) {
+	public ProjectImportParameters(@NotNull final String projectName, @NotNull final String projectDescription, @NotNull final File projectFile, @NotNull final Map<String, String> layerMapping, final boolean forceProjectActivation, @NotNull final List<String> excludePatterns) {
 		_projectName = projectName;
 		_projectFile = projectFile;
 		_layerMapping = layerMapping;
 		_projectDescription = projectDescription;
 		_forceProjectActivation = forceProjectActivation;
+		_excludePatterns = excludePatterns;
 	}
 
 	@NotNull
@@ -65,6 +68,11 @@ public class ProjectImportParameters {
 
 	public boolean forceProjectActivation() {
 		return _forceProjectActivation;
+	}
+
+	@NotNull
+	public List<String> getExcludePatterns() {
+		return _excludePatterns;
 	}
 
 }

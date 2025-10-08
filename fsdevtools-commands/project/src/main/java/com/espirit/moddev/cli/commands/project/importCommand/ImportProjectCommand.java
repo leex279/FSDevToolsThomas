@@ -23,6 +23,8 @@
 package com.espirit.moddev.cli.commands.project.importCommand;
 
 import com.espirit.moddev.cli.ConnectionBuilder;
+import com.espirit.moddev.cli.api.annotations.ParameterExamples;
+import com.espirit.moddev.cli.api.annotations.ParameterType;
 import com.espirit.moddev.cli.commands.SimpleCommand;
 import com.espirit.moddev.cli.commands.project.ProjectCommandGroup;
 import com.espirit.moddev.cli.commands.project.ProjectCommandNames;
@@ -35,23 +37,30 @@ import com.github.rvesse.airline.annotations.OptionType;
 import com.github.rvesse.airline.annotations.help.Examples;
 import com.github.rvesse.airline.annotations.restrictions.Required;
 import de.espirit.firstspirit.access.Connection;
+import org.apache.commons.lang3.StringUtils;
 import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.stream.Collectors;
 
 @Command(name = ProjectCommandNames.IMPORT, groupNames = ProjectCommandGroup.NAME, description = "Imports a FirstSpirit project export into a FirstSpirit Server as a new project.")
 @Examples(
 		examples = {
 				"project import --importProjectName \"newProjectName\" --projectFile \"D:\\my-project-export.tar.gz\"",
 				"project import --importProjectName \"newProjectName\" --projectFile \"D:\\my-project-export.tar.gz\" -dlm *:CREATE_NEW",
-				"project import --importProjectName \"newProjectName\" --projectFile \"D:\\my-project-export.tar.gz\" -dlm sourceLayer_A:targetLayer_A,sourceLayer_B:targetLayer_B"
+				"project import --importProjectName \"newProjectName\" --projectFile \"D:\\my-project-export.tar.gz\" -dlm sourceLayer_A:targetLayer_A,sourceLayer_B:targetLayer_B",
+				"project import --importProjectName \"newProjectName\" --projectFile \"D:\\my-project-export.tar.gz\" --exclude '*.log,temp/*,**/test/**'"
 		},
 		descriptions = {
 				"Imports the project export into a new project that is named newProjectName",
 				"Import project and create for every unknown source schema a new target layer (use if uncertain)",
-				"Import project and use specified mapping for source layers and existing target layers. The target layers must be attached to the project! (use with caution)"
+				"Import project and use specified mapping for source layers and existing target layers. The target layers must be attached to the project! (use with caution)",
+				"Import project while excluding log files, temp directory, and all test directories"
 		}
 )
 public class ImportProjectCommand extends SimpleCommand<SimpleResult<Boolean>> {
@@ -74,6 +83,22 @@ public class ImportProjectCommand extends SimpleCommand<SimpleResult<Boolean>> {
 
 	@Option(type = OptionType.COMMAND, name = {"-dlm", "--databaseLayerMapping"}, description = "Define a map-like layerMapping with comma-separated key-value pairs by : or =; . See command examples.", title = "layerMapping")
 	private String _layerMapping;
+
+	@Option(type = OptionType.COMMAND, name = {"-ex", "--exclude"}, description = "Comma separated list of glob patterns to exclude from import. Patterns use / separator (e.g., *.log, temp/*, src/**/test/**)")
+	@ParameterExamples(
+			examples = {
+					"--exclude '*.log,*.tmp'",
+					"-ex 'temp/*,backup/**'",
+					"--exclude '**/test/**,build/*'"
+			},
+			descriptions = {
+					"Exclude all .log and .tmp files",
+					"Exclude temp and backup directories",
+					"Exclude all test directories and build folder contents"
+			}
+	)
+	@ParameterType(name = "List<String>")
+	private String _excludePatterns;
 
 	@Override
 	public SimpleResult<Boolean> call() {
@@ -98,7 +123,8 @@ public class ImportProjectCommand extends SimpleCommand<SimpleResult<Boolean>> {
 				.setProjectFile(new File(_projectFile))
 				.setProjectDescription(_projectDescription)
 				.forceProjectActivation(_forceProjectActivation)
-				.setLayerMapping(new StringPropertiesMap(_layerMapping));
+				.setLayerMapping(new StringPropertiesMap(_layerMapping))
+				.setExcludePatterns(parseExcludePatterns());
 
 		// import project
 		final boolean imported = new ProjectImporter().importProject(connection, importParametersBuilder.create());
@@ -119,6 +145,17 @@ public class ImportProjectCommand extends SimpleCommand<SimpleResult<Boolean>> {
 	@VisibleForTesting
 	public void setProjectDescription(@NotNull final String projectDescription) {
 		_projectDescription = projectDescription;
+	}
+
+	@NotNull
+	protected List<String> parseExcludePatterns() {
+		if (StringUtils.isBlank(_excludePatterns)) {
+			return Collections.emptyList();
+		}
+		return Arrays.stream(StringUtils.split(_excludePatterns, ","))
+				.filter(StringUtils::isNotBlank)
+				.map(String::trim)
+				.collect(Collectors.toList());
 	}
 
 	@NotNull

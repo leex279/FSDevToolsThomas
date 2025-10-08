@@ -27,6 +27,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.io.File;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -40,6 +41,7 @@ public class ProjectImportParametersBuilder {
 	private Map<String, String> _layerMapping;
 	private String _projectDescription;
 	private boolean _forceProjectActivation;
+	private List<String> _excludePatterns;
 
 	/**
 	 * Sets the project name - this is the name of the (new) target project where the import should go to.
@@ -104,6 +106,18 @@ public class ProjectImportParametersBuilder {
 	}
 
 	/**
+	 * Sets the exclude patterns - glob patterns for files/folders to exclude from import.
+	 *
+	 * @param excludePatterns the list of glob patterns to exclude
+	 * @return this
+	 */
+	@NotNull
+	public ProjectImportParametersBuilder setExcludePatterns(@Nullable final List<String> excludePatterns) {
+		_excludePatterns = excludePatterns;
+		return this;
+	}
+
+	/**
 	 * Creates {@link ProjectImportParameters} from this builder object. For further information,
 	 * have a look at the corresponding {@link ProjectImportParameters} constructor.
 	 *
@@ -113,7 +127,7 @@ public class ProjectImportParametersBuilder {
 	public ProjectImportParameters create() {
 		validateStringInput(_projectName, "Project name should not be null or empty");
 		validateFile(_projectFile, "Project file is null, absent, or not a file");
-		return new ProjectImportParameters(_projectName, _projectDescription == null ? "" : _projectDescription, _projectFile, _layerMapping == null ? Collections.emptyMap() : _layerMapping, _forceProjectActivation);
+		return new ProjectImportParameters(_projectName, _projectDescription == null ? "" : _projectDescription, _projectFile, _layerMapping == null ? Collections.emptyMap() : _layerMapping, _forceProjectActivation, _excludePatterns == null ? Collections.emptyList() : _excludePatterns);
 	}
 
 	private void validateFile(@Nullable final File file, @NotNull final String message) {
