@@ -420,52 +420,61 @@ public abstract class AbstractExportCommand extends SimpleCommand<ExportResult> 
 			return;
 		}
 
-		// Find Import_*.txt files
+		// Find Import_*.txt and Files_*.txt files
 		final File[] importFiles = firstSpiritDir.listFiles((dir, name) ->
 			name.startsWith("Import_") && name.endsWith(".txt"));
-
-		if (importFiles != null && importFiles.length > 0) {
-			for (File importFile : importFiles) {
-				try {
-					filterImportMetadataFile(importFile, excludedPaths);
-				} catch (IOException e) {
-					LOGGER.warn("Failed to filter Import metadata file: {}", importFile.getName(), e);
-				}
-			}
-		}
-
-		// Find Files_*.txt files
 		final File[] filesFiles = firstSpiritDir.listFiles((dir, name) ->
 			name.startsWith("Files_") && name.endsWith(".txt"));
 
-		if (filesFiles != null && filesFiles.length > 0) {
-			for (File filesFile : filesFiles) {
-				try {
-					filterFilesMetadataFile(filesFile, excludedPaths);
-				} catch (IOException e) {
-					LOGGER.warn("Failed to filter Files metadata file: {}", filesFile.getName(), e);
+		if (importFiles == null || importFiles.length == 0) {
+			return;
+		}
+
+		// Process each Import/Files pair
+		for (File importFile : importFiles) {
+			try {
+				// First, collect IDs to exclude from the UNMODIFIED Import file
+				final java.util.Set<String> excludedIds = collectExcludedIds(importFile, excludedPaths);
+
+				if (!excludedIds.isEmpty()) {
+					LOGGER.debug("Found {} excluded IDs to filter", excludedIds.size());
+
+					// Filter Import file
+					filterImportMetadataFile(importFile, excludedIds);
+
+					// Filter corresponding Files file
+					final String importFileName = importFile.getName();
+					final String filesFileName = importFileName.replace("Import_", "Files_");
+					final File filesFile = new File(firstSpiritDir, filesFileName);
+
+					LOGGER.debug("Looking for Files file: {}, exists: {}", filesFileName, filesFile.exists());
+
+					if (filesFile.exists()) {
+						filterFilesMetadataFile(filesFile, excludedIds);
+					} else {
+						LOGGER.warn("Files metadata file not found: {}", filesFileName);
+					}
 				}
+			} catch (IOException e) {
+				LOGGER.warn("Failed to filter metadata files for: {}", importFile.getName(), e);
 			}
 		}
 	}
 
 	/**
-	 * Filters an Import metadata file to remove entries for excluded paths.
+	 * Filters an Import metadata file to remove entries for excluded IDs.
 	 *
 	 * @param importFile The Import_*.txt file
-	 * @param excludedPaths List of excluded relative paths
+	 * @param excludedIds Set of IDs to exclude
 	 */
-	private void filterImportMetadataFile(final File importFile, final List<String> excludedPaths) throws IOException {
+	private void filterImportMetadataFile(final File importFile, final java.util.Set<String> excludedIds) throws IOException {
 		final List<String> lines = Files.readAllLines(importFile.toPath());
 		final List<String> filteredLines = new ArrayList<>();
 
 		int removedEntries = 0;
 		boolean inExcludedBlock = false;
-		boolean isHeaderSection = true;
 
-		for (int i = 0; i < lines.size(); i++) {
-			final String line = lines.get(i);
-
+		for (String line : lines) {
 			// Keep header lines (comments and metadata)
 			if (line.startsWith("#") || line.trim().isEmpty()) {
 				if (!inExcludedBlock) {
@@ -474,35 +483,17 @@ public abstract class AbstractExportCommand extends SimpleCommand<ExportResult> 
 				continue;
 			}
 
-			isHeaderSection = false;
-
 			// Check if this is a block start [ID]
 			if (line.startsWith("[") && line.endsWith("]")) {
-				// Check if the next lines contain a name that should be excluded
-				inExcludedBlock = false;
-
-				// Look ahead to find the name field
-				for (int j = i + 1; j < lines.size() && j < i + 15; j++) {
-					final String nextLine = lines.get(j);
-					if (nextLine.startsWith("[")) {
-						// Reached next block
-						break;
-					}
-					if (nextLine.startsWith("name=")) {
-						final String name = nextLine.substring(5);
-						if (isPathExcluded(name, excludedPaths)) {
-							inExcludedBlock = true;
-							removedEntries++;
-							LOGGER.debug("Excluding metadata entry: {}", name);
-						}
-						break;
-					}
+				final String id = line.substring(1, line.length() - 1);
+				inExcludedBlock = excludedIds.contains(id);
+				if (inExcludedBlock) {
+					removedEntries++;
+					LOGGER.debug("Excluding Import metadata entry: [{}]", id);
 				}
+			}
 
-				if (!inExcludedBlock) {
-					filteredLines.add(line);
-				}
-			} else if (!inExcludedBlock) {
+			if (!inExcludedBlock) {
 				filteredLines.add(line);
 			}
 		}
@@ -517,26 +508,9 @@ public abstract class AbstractExportCommand extends SimpleCommand<ExportResult> 
 	 * Filters a Files metadata file to remove entries for excluded IDs.
 	 *
 	 * @param filesFile The Files_*.txt file
-	 * @param excludedPaths List of excluded relative paths
+	 * @param excludedIds Set of IDs to exclude
 	 */
-	private void filterFilesMetadataFile(final File filesFile, final List<String> excludedPaths) throws IOException {
-		// First, collect the excluded IDs from the corresponding Import file
-		final String filesFileName = filesFile.getName();
-		final String importFileName = filesFileName.replace("Files_", "Import_");
-		final File importFile = new File(filesFile.getParent(), importFileName);
-
-		if (!importFile.exists()) {
-			LOGGER.debug("No corresponding Import file found for: {}", filesFileName);
-			return;
-		}
-
-		// Collect excluded IDs from Import file
-		final java.util.Set<String> excludedIds = collectExcludedIds(importFile, excludedPaths);
-
-		if (excludedIds.isEmpty()) {
-			return;
-		}
-
+	private void filterFilesMetadataFile(final File filesFile, final java.util.Set<String> excludedIds) throws IOException {
 		// Filter Files_*.txt based on excluded IDs
 		final List<String> lines = Files.readAllLines(filesFile.toPath());
 		final List<String> filteredLines = new ArrayList<>();
