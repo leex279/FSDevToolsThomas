@@ -25,12 +25,12 @@ fun Project.getArtifactory(snapshotRepository: String, releaseRepository: String
 }
 
 fun Project.disablePublishing() {
-    tasks.getByName("generatePomFileForMavenPublication").enabled = false
-    tasks.getByName("publish").enabled = false
-    tasks.getByName("publishToMavenLocal").enabled = false
-    tasks.getByName("publishMavenPublicationToMavenRepository").enabled = false
-    tasks.getByName("publishMavenPublicationToMavenLocal").enabled = false
-    tasks.getByName("publishAllPublicationsToMavenRepository").enabled = false
+    tasks.findByName("generatePomFileForMavenPublication")?.enabled = false
+    tasks.findByName("publish")?.enabled = false
+    tasks.findByName("publishToMavenLocal")?.enabled = false
+    tasks.findByName("publishMavenPublicationToMavenRepository")?.enabled = false
+    tasks.findByName("publishMavenPublicationToMavenLocal")?.enabled = false
+    tasks.findByName("publishAllPublicationsToMavenRepository")?.enabled = false
 }
 
 /**
