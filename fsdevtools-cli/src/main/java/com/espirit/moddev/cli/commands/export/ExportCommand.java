@@ -51,7 +51,9 @@ import static com.espirit.moddev.cli.api.parsing.parser.SchemaIdentifierParser.C
 				"export -- schema:news",
 				"export -- schema:news[setExportGidMapping=true]",
 				"export -- projectproperty:LANGUAGES projectproperty:RESOLUTIONS",
-				"export -- projectproperty:ALL"
+				"export -- projectproperty:ALL",
+				"export --exclude 'path:templatestore/translation_studio' -- templatestore",
+				"export -ex 'templatestore/test/**,*.log' -- templatestore"
 		},
 		descriptions = {
 				"Exports a pagetemplate and a page",
@@ -63,7 +65,9 @@ import static com.espirit.moddev.cli.api.parsing.parser.SchemaIdentifierParser.C
 				"Exports the database schema 'news'",
 				"Exports the database schema 'news' with an additional Mapping.xml",
 				"Exports the project properties languages and resolutions",
-				"Exports all project properties"
+				"Exports all project properties",
+				"Exports templatestore while excluding the translation_studio folder",
+				"Exports templatestore while excluding test folders and log files"
 		})
 public class ExportCommand extends AbstractExportCommand {
 

@@ -32,13 +32,18 @@ import com.espirit.moddev.cli.api.parsing.parser.RegistryBasedParser;
 import com.espirit.moddev.cli.api.parsing.parser.RootNodeIdentifierParser;
 import com.espirit.moddev.cli.api.parsing.parser.SchemaIdentifierParser;
 import com.espirit.moddev.cli.api.parsing.parser.UidIdentifierParser;
+import com.espirit.moddev.cli.api.annotations.ParameterExamples;
+import com.espirit.moddev.cli.api.annotations.ParameterType;
 import com.espirit.moddev.cli.commands.PermissionsMode;
 import com.espirit.moddev.cli.commands.SimpleCommand;
+import com.espirit.moddev.cli.commands.StorePathExclusionMatcher;
 import com.espirit.moddev.cli.commands.help.HelpCommand;
 import com.espirit.moddev.cli.results.ExportResult;
 import com.github.rvesse.airline.annotations.Arguments;
 import com.github.rvesse.airline.annotations.Option;
+import com.github.rvesse.airline.annotations.OptionType;
 import com.github.rvesse.airline.annotations.restrictions.AllowedRawValues;
+import org.apache.commons.lang3.StringUtils;
 import de.espirit.firstspirit.access.store.IDProvider;
 import de.espirit.firstspirit.access.store.Store;
 import de.espirit.firstspirit.agency.OperationAgent;
@@ -49,11 +54,18 @@ import de.espirit.firstspirit.transport.PropertiesTransportOptions.ProjectProper
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
+import java.io.IOException;
 import java.lang.invoke.MethodHandles;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * This class gathers shared logic and options for different export commands. It can be extended for custom implementations of uid filtering, or to
@@ -93,6 +105,23 @@ public abstract class AbstractExportCommand extends SimpleCommand<ExportResult> 
 			title = "permissionMode")
 	@AllowedRawValues(ignoreCase = true, allowedValues = {"NONE", "ALL", "STORE_ELEMENT", "WORKFLOW"})
 	private PermissionsMode _permissionMode = PermissionsMode.NONE;
+
+	@Option(type = OptionType.COMMAND, name = {"-ex", "--exclude"},
+			description = "Comma separated list of paths/patterns to exclude from export. Use 'path:/store/folder' for exact paths or glob patterns like '**/*.log'")
+	@ParameterExamples(
+			examples = {
+					"--exclude 'path:templatestore/translation_studio'",
+					"-ex 'templatestore/test/**,*.log'",
+					"--exclude 'path:pagestore/folder,*.tmp'"
+			},
+			descriptions = {
+					"Exclude exact path using path: prefix",
+					"Exclude paths matching glob patterns",
+					"Combine exact paths and patterns"
+			}
+	)
+	@ParameterType(name = "List<String>")
+	private String _excludePatterns;
 
 	@Arguments(title = "identifiers",
 			description = "A list of various parsable identifiers. Please have a look at the command description for further information.")
@@ -281,7 +310,15 @@ public abstract class AbstractExportCommand extends SimpleCommand<ExportResult> 
 			// export
 			final String syncDirStr = getSynchronizationDirectoryString();
 			LOGGER.info("exporting to directory '{}'", syncDirStr);
-			return new ExportResult(getContext().requireSpecialist(StoreAgent.TYPE), exportOperation.perform(getSynchronizationDirectory(syncDirStr)));
+			final ExportOperation.Result exportResult = exportOperation.perform(getSynchronizationDirectory(syncDirStr));
+
+			// Apply exclusion cleanup if patterns are provided
+			final List<String> excludePatterns = parseExcludePatterns();
+			if (!excludePatterns.isEmpty()) {
+				applyExclusionCleanup(new File(syncDirStr), excludePatterns);
+			}
+
+			return new ExportResult(getContext().requireSpecialist(StoreAgent.TYPE), exportResult);
 		} catch (final Exception e) {
 			return new ExportResult(e);
 		}
@@ -294,6 +331,66 @@ public abstract class AbstractExportCommand extends SimpleCommand<ExportResult> 
 	 */
 	public void addIdentifier(final String identifier) {
 		_identifiers.add(identifier);
+	}
+
+	/**
+	 * Parse exclude patterns from comma-separated string.
+	 *
+	 * @return List of exclude patterns
+	 */
+	protected List<String> parseExcludePatterns() {
+		if (StringUtils.isBlank(_excludePatterns)) {
+			return Collections.emptyList();
+		}
+		return Arrays.stream(StringUtils.split(_excludePatterns, ","))
+				.filter(StringUtils::isNotBlank)
+				.map(String::trim)
+				.collect(Collectors.toList());
+	}
+
+	/**
+	 * Applies exclusion cleanup to the sync directory after export.
+	 * Deletes files and folders matching the exclusion patterns.
+	 *
+	 * @param syncDir The sync directory
+	 * @param excludePatterns List of exclusion patterns
+	 */
+	private void applyExclusionCleanup(final File syncDir, final List<String> excludePatterns) {
+		final StorePathExclusionMatcher matcher = new StorePathExclusionMatcher(excludePatterns);
+		LOGGER.info("Applying exclusion patterns: {}", String.join(", ", excludePatterns));
+
+		int excludedCount = 0;
+		try (Stream<Path> paths = Files.walk(syncDir.toPath())) {
+			// Collect paths to delete (in reverse order to delete children before parents)
+			final List<File> filesToDelete = paths
+				.map(Path::toFile)
+				.filter(file -> matcher.shouldExclude(syncDir, file))
+				.sorted((a, b) -> -a.getAbsolutePath().compareTo(b.getAbsolutePath()))
+				.collect(Collectors.toList());
+
+			for (File file : filesToDelete) {
+				try {
+					if (file.isDirectory()) {
+						// Only delete if directory is empty (children already deleted)
+						if (file.list() != null && file.list().length == 0) {
+							Files.delete(file.toPath());
+							LOGGER.debug("Deleted excluded directory: {}", file.getAbsolutePath());
+							excludedCount++;
+						}
+					} else {
+						Files.delete(file.toPath());
+						LOGGER.debug("Deleted excluded file: {}", file.getAbsolutePath());
+						excludedCount++;
+					}
+				} catch (IOException e) {
+					LOGGER.warn("Failed to delete excluded file: {}", file.getAbsolutePath(), e);
+				}
+			}
+		} catch (IOException e) {
+			LOGGER.warn("Failed to walk sync directory for exclusion cleanup", e);
+		}
+
+		LOGGER.info("Excluded {} files/folders from export", excludedCount);
 	}
 
 }
