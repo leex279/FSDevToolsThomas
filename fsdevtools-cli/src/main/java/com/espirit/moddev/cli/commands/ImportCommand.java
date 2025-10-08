@@ -23,6 +23,8 @@
 package com.espirit.moddev.cli.commands;
 
 import com.espirit.moddev.cli.CliConstants;
+import com.espirit.moddev.cli.api.annotations.ParameterExamples;
+import com.espirit.moddev.cli.api.annotations.ParameterType;
 import com.espirit.moddev.cli.api.configuration.ImportConfig;
 import com.espirit.moddev.cli.common.StringPropertiesMap;
 import com.espirit.moddev.cli.results.ImportResult;
@@ -33,11 +35,25 @@ import com.github.rvesse.airline.annotations.OptionType;
 import com.github.rvesse.airline.annotations.help.Examples;
 import de.espirit.firstspirit.agency.OperationAgent;
 import de.espirit.firstspirit.agency.StoreAgent;
+import de.espirit.firstspirit.io.FileSystem;
+import de.espirit.firstspirit.io.FileSystemsAgent;
 import de.espirit.firstspirit.store.access.nexport.operations.ImportOperation;
 import de.espirit.firstspirit.transport.ImportPermissionTransportOptions;
 import de.espirit.firstspirit.transport.LayerMapper;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Command that executes a FirstSpirit ImportOperation. Uses a FirstSpirit context.
@@ -48,13 +64,17 @@ import org.slf4j.LoggerFactory;
 				"import -lm *:CREATE_NEW",
 				"import -lm my_schema:CREATE_NEW",
 				"import -lm *:targetLayer",
-				"import -lm schema_a:targetLayer_a,schema_b:targetLayer_b"
+				"import -lm schema_a:targetLayer_a,schema_b:targetLayer_b",
+				"import --exclude 'path:/templatestore/translationstudio'",
+				"import --exclude 'templatestore/test/**,*.log'"
 		},
 		descriptions = {
 				"Import project and create for every unknown source schema a new target layer (use if uncertain)",
 				"Import project and create for source schema 'my_schema' a new layer",
 				"Import project and redirect every unknown source schema into given target layer. The target layer must be attached to the project! (use with caution)",
-				"Import project and use specified mapping for source schemas and existing target layers. The target layers must be attached to the project! (use with caution)"
+				"Import project and use specified mapping for source schemas and existing target layers. The target layers must be attached to the project! (use with caution)",
+				"Import project while excluding exact path using path: prefix",
+				"Import project while excluding paths matching glob patterns"
 		}
 )
 public class ImportCommand extends SimpleCommand<ImportResult> implements ImportConfig {
@@ -104,6 +124,23 @@ public class ImportCommand extends SimpleCommand<ImportResult> implements Import
 			type = OptionType.COMMAND)
 	private String layerMapping;
 
+	@Option(type = OptionType.COMMAND, name = {"-ex", "--exclude"},
+			description = "Comma separated list of paths/patterns to exclude from import. Use 'path:/store/folder' for exact paths or glob patterns like '**/*.log'")
+	@ParameterExamples(
+			examples = {
+					"--exclude 'path:/templatestore/translationstudio'",
+					"-ex 'templatestore/test/**,*.log'",
+					"--exclude 'path:/pagestore/folder,*.tmp'"
+			},
+			descriptions = {
+					"Exclude exact path using path: prefix",
+					"Exclude paths matching glob patterns",
+					"Combine exact paths and patterns"
+			}
+	)
+	@ParameterType(name = "List<String>")
+	private String _excludePatterns;
+
 	public ImportCommand() {
 		super();
 	}
@@ -144,9 +181,31 @@ public class ImportCommand extends SimpleCommand<ImportResult> implements Import
 				importOperation.setImportScheduleEntryActiveState(true);
 			}
 			final String syncDirStr = getSynchronizationDirectoryString();
-			LOGGER.info("importing from directory '{}'", syncDirStr);
-			final ImportOperation.Result result = importOperation.perform(getSynchronizationDirectory(syncDirStr));
-			return new ImportResult(getContext().requireSpecialist(StoreAgent.TYPE), result);
+
+			// Apply exclusion filtering if patterns are provided
+			String dirPathToImport = syncDirStr;
+			File tempFilteredDir = null;
+			final List<String> excludePatterns = parseExcludePatterns();
+			if (!excludePatterns.isEmpty()) {
+				final StorePathExclusionMatcher matcher = new StorePathExclusionMatcher(excludePatterns);
+				LOGGER.info("Applying exclusion patterns: {}", String.join(", ", excludePatterns));
+				final File syncDir = new File(syncDirStr);
+				tempFilteredDir = createFilteredSyncDirectory(syncDir, matcher);
+				dirPathToImport = tempFilteredDir.getAbsolutePath();
+			}
+
+			try {
+				LOGGER.info("importing from directory '{}'", dirPathToImport);
+				final FileSystemsAgent fileSystemsAgent = getContext().requireSpecialist(FileSystemsAgent.TYPE);
+				final FileSystem<?> fileSystem = fileSystemsAgent.getOSFileSystem(dirPathToImport);
+				final ImportOperation.Result result = importOperation.perform(fileSystem);
+				return new ImportResult(getContext().requireSpecialist(StoreAgent.TYPE), result);
+			} finally {
+				// Clean up temporary filtered directory if created
+				if (tempFilteredDir != null && tempFilteredDir.exists()) {
+					deleteDirectory(tempFilteredDir);
+				}
+			}
 		} catch (final Exception e) {
 			return new ImportResult(e);
 		}
@@ -181,5 +240,83 @@ public class ImportCommand extends SimpleCommand<ImportResult> implements Import
 	 */
 	public void setCreateProjectIfMissing(final boolean createProjectIfMissing) {
 		this.dontCreateProjectIfMissing = !createProjectIfMissing;
+	}
+
+	/**
+	 * Parse exclude patterns from comma-separated string.
+	 *
+	 * @return List of exclude patterns
+	 */
+	protected List<String> parseExcludePatterns() {
+		if (StringUtils.isBlank(_excludePatterns)) {
+			return Collections.emptyList();
+		}
+		return Arrays.stream(StringUtils.split(_excludePatterns, ","))
+				.filter(StringUtils::isNotBlank)
+				.map(String::trim)
+				.collect(Collectors.toList());
+	}
+
+	/**
+	 * Creates a filtered copy of the sync directory excluding files matching the patterns.
+	 *
+	 * @param sourceDir The source sync directory
+	 * @param matcher The exclusion matcher
+	 * @return A temporary directory with filtered content
+	 * @throws IOException if file operations fail
+	 */
+	private File createFilteredSyncDirectory(final File sourceDir, final StorePathExclusionMatcher matcher) throws IOException {
+		final File tempDir = Files.createTempDirectory("fs-import-filtered-").toFile();
+		int excludedCount = 0;
+		int includedCount = 0;
+
+		try (Stream<Path> paths = Files.walk(sourceDir.toPath())) {
+			for (Path sourcePath : paths.collect(Collectors.toList())) {
+				final File sourceFile = sourcePath.toFile();
+
+				// Check if this file should be excluded
+				if (matcher.shouldExclude(sourceDir, sourceFile)) {
+					LOGGER.debug("Excluding: {}", sourceFile.getAbsolutePath());
+					excludedCount++;
+					continue;
+				}
+
+				// Calculate target path
+				final Path relativePath = sourceDir.toPath().relativize(sourcePath);
+				final Path targetPath = tempDir.toPath().resolve(relativePath);
+
+				// Copy file or create directory
+				if (sourceFile.isDirectory()) {
+					Files.createDirectories(targetPath);
+				} else {
+					Files.createDirectories(targetPath.getParent());
+					Files.copy(sourcePath, targetPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
+					includedCount++;
+				}
+			}
+		}
+
+		LOGGER.info("Excluded {} files/folders matching patterns, included {} files", excludedCount, includedCount);
+		return tempDir;
+	}
+
+	/**
+	 * Recursively delete a directory and its contents.
+	 *
+	 * @param directory The directory to delete
+	 */
+	private void deleteDirectory(final File directory) {
+		try (Stream<Path> paths = Files.walk(directory.toPath())) {
+			paths.sorted((a, b) -> -a.compareTo(b)) // Reverse order to delete files before directories
+				.forEach(path -> {
+					try {
+						Files.delete(path);
+					} catch (IOException e) {
+						LOGGER.warn("Failed to delete temporary file: {}", path, e);
+					}
+				});
+		} catch (IOException e) {
+			LOGGER.warn("Failed to clean up temporary directory: {}", directory.getAbsolutePath(), e);
+		}
 	}
 }
